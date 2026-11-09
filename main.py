@@ -35,7 +35,7 @@ task_threads = {}
 
 # PostgreSQL 数据库配置
 DB_HOST = os.getenv("PG_HOST", "localhost")
-DB_PORT = int(os.getenv("PG_PORT", 5432))
+DB_PORT = int(os.getenv("PG_PORT", 6543))
 DB_NAME = os.getenv("PG_DATABASE")
 DB_USER = os.getenv("PG_USER")
 DB_PASS = os.getenv("PG_PASSWORD")
