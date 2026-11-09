@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body{padding:20px;background:#222;color:#fff;font-family:monospace}
+        input{width:340px;padding:8px;margin:5px 0}
+        button{padding:8px 16px;margin:5px;border:none;border-radius:4px;cursor:pointer}
+        .start{background:#0a0;color:#fff}
+        .task-area{margin-top:20px;display:flex;gap:10px;flex-wrap:wrap}
+        .task{background:#111;padding:10px;border-radius:6px;width:48%}
+        .task-log{height:180px;overflow-y:auto;margin-top:5px;font-size:12px;white-space:pre-wrap}
+
+        .log-info{color:#4299e1}
+        .log-success{color:#48bb78}
+        .log-warning{color:#ecc94b}
+        .log-error{color:#f56565}
+        .log-cancel{color:#fc8181}
+    </style>
+</head>
+<body>
+<h2>电影爬虫（稳定版）</h2>
+
+<input id="table" placeholder="表名" value="vod"><br>
+<input id="api" placeholder="API地址" value="https://dyttzy5.tv/api.php/provide/vod/from/dyttm3u8/at/json/"><br>
+<input id="startPage" placeholder="从第几页开始（默认1）" value="1"><br>
+
+<button class="start" onclick="startTask()">启动任务</button>
+
+<div class="task-area" id="taskArea"></div>
+
+<script>
+// 全局保存 ES 实例与重连状态
+const esMap = {};
+const reconnectMap = {};
+
+function startTask() {
+    let table = document.getElementById("table").value.trim();
+    let api = document.getElementById("api").value.trim();
+    let startPage = document.getElementById("startPage").value.trim();
+    if (!table || !api) return alert("请填写完整");
+    if (!startPage) startPage = 1;
+
+    let taskId = "task_" + Date.now();
+    let html = `
+    <div class="task" id="${taskId}">
+        任务：${taskId}<br>
+        表：${table}<br>
+        起始页：${startPage}<br>
+        API：${api}<br>
+        <button class="cancel-btn" id="btn_${taskId}">取消任务</button>
+        <div class="task-log" id="log_${taskId}">🚀 启动中...</div>
+    </div>`;
+    document.getElementById("taskArea").innerHTML += html;
+
+    document.getElementById(`btn_${taskId}`).onclick = () => {
+        cancelTask(taskId);
+    };
+
+    // 初始化重连状态
+    reconnectMap[taskId] = { attempts: 0, maxDelay: 30000 };
+    connectSSE(taskId, table, api, startPage);
+}
+
+// 带指数退避的 SSE 连接
+function connectSSE(taskId, table, api, startPage) {
+    // 已有连接先关闭
+    if (esMap[taskId]) esMap[taskId].close();
+
+    let url = `/api/run?taskId=${taskId}&tableName=${encodeURIComponent(table)}&apiUrl=${encodeURIComponent(api)}&startPage=${startPage}`;
+    let es = new EventSource(url);
+    esMap[taskId] = es;
+
+    // 收到消息
+    es.onmessage = function(e) {
+        // 心跳忽略
+        if (e.data.startsWith(":") || e.data === "") return;
+
+        let log = document.getElementById(`log_${taskId}`);
+        let msg = e.data;
+        let className = "";
+        if (msg.includes("✅")) className = "log-success";
+        else if (msg.includes("🚀")) className = "log-info";
+        else if (msg.includes("⚠️") || msg.includes("ℹ️")) className = "log-warning";
+        else if (msg.includes("❌")) className = "log-error";
+        else if (msg.includes("🛑")) className = "log-cancel";
+        else className = "log-success";
+        log.innerHTML += `<div class="${className}">${msg}</div>`;
+        log.scrollTop = log.scrollHeight;
+
+        // 收到结束消息，停止重连
+        if (msg.includes("任务结束") || msg.includes("全部爬取完成")) {
+            reconnectMap[taskId].stop = true;
+        }
+    };
+
+    // 连接错误/关闭 → 自动重连
+    es.onerror = function() {
+        es.close();
+        if (reconnectMap[taskId].stop) return;
+
+        let delay = Math.min(1000 * Math.pow(2, reconnectMap[taskId].attempts), reconnectMap[taskId].maxDelay);
+        reconnectMap[taskId].attempts++;
+
+        let log = document.getElementById(`log_${taskId}`);
+        log.innerHTML += `<div class="log-warning">⚠️ 连接中断，${delay/1000}秒后自动重连...</div>`;
+        log.scrollTop = log.scrollHeight;
+
+        setTimeout(() => {
+            connectSSE(taskId, table, api, startPage);
+        }, delay);
+    };
+
+    // 连接打开 → 重置重连计数
+    es.onopen = function() {
+        reconnectMap[taskId].attempts = 0;
+        let log = document.getElementById(`log_${taskId}`);
+        log.innerHTML += `<div class="log-info">🔗 连接已恢复</div>`;
+        log.scrollTop = log.scrollHeight;
+    };
+}
+
+function cancelTask(taskId) {
+    // 标记停止重连
+    reconnectMap[taskId].stop = true;
+    if (esMap[taskId]) esMap[taskId].close();
+    fetch(`/api/cancel?taskId=${taskId}`);
+
+    let logDom = document.getElementById(`log_${taskId}`);
+    logDom.innerHTML += `<div class="log-cancel">🛑 任务已取消</div>`;
+    logDom.scrollTop = logDom.scrollHeight;
+
+    document.getElementById(`btn_${taskId}`).style.display = "none";
+}
+</script>
+</body>
+</html>
