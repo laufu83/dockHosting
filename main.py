@@ -49,10 +49,12 @@ KEEP_FIELDS = [
     "vod_name", "vod_sub", "vod_en", "vod_letter",
     "vod_class", "vod_pic", "vod_actor", "vod_director",
     "vod_area", "vod_lang", "vod_year", "vod_douban_id",
-     "vod_content", "vod_remarks",
+    "vod_content", "vod_remarks",
     "vod_score", "vod_play_url", "vod_status", "vod_time",
     "vod_name_letter"
 ]
+
+
 def get_chinese_first_letter(text: str) -> str:
     """
     获取字符串中所有汉字拼音首字母，过滤非字母字符，只保留大写字母，最多50个字符
@@ -82,6 +84,7 @@ def get_chinese_first_letter(text: str) -> str:
             break
     # 最多截取前50个大写字母返回
     return ''.join(result[:50])
+
 
 def console_log(task_id, msg):
     log_msg = f"[{task_id}] {msg}"
@@ -129,21 +132,23 @@ def clean_video_data(v):
     return cleaned
 
 
-# PostgreSQL 连接
-# ===================== 🔥 关键修复：每次都用新连接 =====================
-def get_conn():
-    try:
-        return psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS,
-            connect_timeout=10
-        )
-    except Exception as e:
-        print(f"❌ DB连接失败: {e}")
-        return None
+# ===================== 修复：增加重试 + sslmode="require" =====================
+def get_conn(retry=2):
+    for i in range(retry):
+        try:
+            return psycopg2.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                dbname=DB_NAME,
+                user=DB_USER,
+                password=DB_PASS,
+                connect_timeout=10,
+                sslmode="require"
+            )
+        except Exception as e:
+            print(f"❌ DB连接失败 重试{i+1}/{retry}: {e}")
+            time.sleep(1)
+    return None
 
 
 # 建表（PostgreSQL 语法）
@@ -152,6 +157,9 @@ def create_table_if_not_exists(table_name):
         return True
     try:
         conn = get_conn()
+        if conn is None:
+            print("❌ 获取数据库连接失败，建表失败")
+            return False
         cur = conn.cursor()
 
         create_sql = f"""
@@ -190,17 +198,20 @@ def movie_spider(task_id, table_name, api_base_url, start_page=1):
             return
         try:
             conn = get_conn()
+            if conn is None:
+                console_log(task_id, f"❌ 获取数据库连接失败，跳过本次入库")
+                return
             cur = conn.cursor()
             cleaned = [clean_video_data(v) for v in videos]
             cols = list(cleaned[0].keys())
 
             insert_sql = sql.SQL("""
-                                 INSERT INTO {table} ({fields})
-                                 VALUES %s
-                                 ON CONFLICT (vod_id) DO
-                                 UPDATE SET
-                                     {updates}
-                                 """).format(
+                                INSERT INTO {table} ({fields})
+                                VALUES %s
+                                ON CONFLICT (vod_id) DO
+                                UPDATE SET
+                                    {updates}
+                                """).format(
                 table=sql.Identifier(table_name),
                 fields=sql.SQL(', ').join(map(sql.Identifier, cols)),
                 updates=sql.SQL(', ').join(
@@ -253,16 +264,6 @@ def movie_spider(task_id, table_name, api_base_url, start_page=1):
             time.sleep(PAGE_DELAY)
             session = get_session()
             detail_resp = session.get(f"{api_base_url}?ac=detail&pg={page}", timeout=10)
-            detail_resp.raise_for_status()
-            # data = resp.json()
-            # lst = data.get("list", [])
-            # if not lst:
-            #     console_log(task_id, f"ℹ️ 第{page}页无数据")
-            #     return
-            # ids = [str(x["vod_id"]) for x in lst if x.get("vod_id")]
-            # if not ids:
-            #     return
-            # detail_resp = session.get(f"{api_base_url}?ac=detail&ids={','.join(ids)}", timeout=20)
             detail_resp.raise_for_status()
             detail = detail_resp.json()
             add_cache(detail.get("list", []))
@@ -319,10 +320,12 @@ async def log_stream(task_id: str, request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTMLResponse(render_template("index.html"))
-	
+
+
 @app.get("/api/ping")
 async def ping():
     return {"ok": True, "time": time.time()}
+
 
 @app.get("/api/run")
 async def run_task(request: Request, taskId: str, tableName: str, apiUrl: str, startPage: int = 1):
